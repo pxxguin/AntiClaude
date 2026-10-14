@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
+#[allow(clippy::struct_excessive_bools)]
 #[command(
     name = "anticlaude",
     version,
@@ -37,6 +38,7 @@ pub(crate) enum Command {
     Prevent,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct CleanOptions {
     pub target: String,
     pub yes: bool,

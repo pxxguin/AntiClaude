@@ -6,13 +6,18 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Output},
+    sync::LazyLock,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tempfile::TempDir;
 
 const REFRESH: &str = "chore: refresh GitHub contributors";
-const CALLBACK: &str = r#"import re
+static TARGET_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[\w.-]+/[\w.-]+$").unwrap());
+static IDENTITY_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("(?i)claude|anthropic").unwrap());
+const CALLBACK: &str = r"import re
 text=message.decode('utf-8','replace'); out=[]
 for line in text.split('\n'):
  low=line.strip().lower()
@@ -23,32 +28,21 @@ for line in text.split('\n'):
  line=re.sub(r'(?i)\s*<?noreply@anthropic\.com>?','',line)
  if low and not line.strip(): continue
  out.append(line)
-return (re.sub(r'\n{3,}','\n\n','\n'.join(out)).rstrip('\n')+'\n').encode('utf-8')"#;
+return (re.sub(r'\n{3,}','\n\n','\n'.join(out)).rstrip('\n')+'\n').encode('utf-8')";
 
-#[derive(Clone)]
 struct Target {
     url: String,
     slug: String,
 }
 
-pub(crate) fn execute(options: crate::cli::CleanOptions) -> Result<()> {
+pub(crate) fn execute(options: &crate::cli::CleanOptions) -> Result<()> {
     let target = normalize(&options.target)?;
-    clean(
-        target,
-        options.yes,
-        options.dry_run,
-        options.refresh,
-        options.backup,
-    )
-}
-
-fn clean(target: Target, yes: bool, dry: bool, refresh: bool, backup_enabled: bool) -> Result<()> {
     require("git", &["--version"])?;
     require("git-filter-repo", &["--version"])?;
     let gh = available("gh");
     if gh {
         cmd("gh", &["auth", "status"], None).context("authenticate first with `gh auth login`")?;
-    } else if refresh {
+    } else if options.refresh {
         bail!("GitHub CLI `gh` is required for the contributors graph refresh")
     }
     let temp = TempDir::new()?;
@@ -90,57 +84,68 @@ fn clean(target: Target, yes: bool, dry: bool, refresh: bool, backup_enabled: bo
     if identities > 0 {
         println!("  warning: {identities} Claude author/committer identities are not rewritten");
     }
-    if dry {
+    if options.dry_run {
         println!("\nDry run complete; nothing changed.");
         return Ok(());
     }
-    if !yes {
-        confirm(hit_count > 0)?
+    if !options.yes {
+        confirm(hit_count > 0)?;
     }
     if hit_count > 0 {
-        if backup_enabled {
-            println!("Backup: {}", backup(&repo, &target.slug)?.display())
-        } else {
-            println!("Warning: backup disabled.")
-        }
-        let origin = git(&repo, &["remote", "get-url", "origin"])?;
-        cmd(
-            "git",
-            &["filter-repo", "--force", "--message-callback", CALLBACK],
-            Some(&repo),
-        )?;
-        if hits(&repo, "--all")? > 0 {
-            bail!("traces remain after rewriting; refusing to push")
-        }
-        let _ = cmd("git", &["remote", "remove", "origin"], Some(&repo));
-        cmd(
-            "git",
-            &["remote", "add", "origin", origin.trim()],
-            Some(&repo),
-        )?;
-        for b in &branches {
-            println!("Force-pushing branch {b}...");
-            cmd("git", &["push", "origin", b, "--force"], Some(&repo))
-                .with_context(|| format!("push {b}; check branch protection"))?;
-        }
-        for t in &tags {
-            println!("Force-pushing tag {t}...");
-            cmd(
-                "git",
-                &["push", "origin", &format!("refs/tags/{t}"), "--force"],
-                Some(&repo),
-            )
-            .with_context(|| format!("push tag {t}; check tag protection"))?;
-        }
-        if refresh && !wait_clean(&target.slug)? {
+        rewrite_and_push(&repo, &target.slug, &branches, &tags, options.backup)?;
+        if options.refresh && !wait_clean(&target.slug)? {
             bail!("clean history was pushed, but GitHub is still indexing it; rerun shortly to refresh the graph")
         }
     }
-    if refresh {
+    if options.refresh {
         refresh_graph(&repo, &target.slug)?;
-        println!("\nDone. History and contributors graph are clean.")
+        println!("\nDone. History and contributors graph are clean.");
     } else {
-        println!("\nDone. Graph refresh skipped.")
+        println!("\nDone. Graph refresh skipped.");
+    }
+    Ok(())
+}
+
+fn rewrite_and_push(
+    repo: &Path,
+    slug: &str,
+    branches: &[String],
+    tags: &[String],
+    backup_enabled: bool,
+) -> Result<()> {
+    if backup_enabled {
+        println!("Backup: {}", backup(repo, slug)?.display());
+    } else {
+        println!("Warning: backup disabled.");
+    }
+    let origin = git(repo, &["remote", "get-url", "origin"])?;
+    cmd(
+        "git",
+        &["filter-repo", "--force", "--message-callback", CALLBACK],
+        Some(repo),
+    )?;
+    if hits(repo, "--all")? > 0 {
+        bail!("traces remain after rewriting; refusing to push")
+    }
+    let _ = cmd("git", &["remote", "remove", "origin"], Some(repo));
+    cmd(
+        "git",
+        &["remote", "add", "origin", origin.trim()],
+        Some(repo),
+    )?;
+    for branch in branches {
+        println!("Force-pushing branch {branch}...");
+        cmd("git", &["push", "origin", branch, "--force"], Some(repo))
+            .with_context(|| format!("push {branch}; check branch protection"))?;
+    }
+    for tag in tags {
+        println!("Force-pushing tag {tag}...");
+        cmd(
+            "git",
+            &["push", "origin", &format!("refs/tags/{tag}"), "--force"],
+            Some(repo),
+        )
+        .with_context(|| format!("push tag {tag}; check tag protection"))?;
     }
     Ok(())
 }
@@ -152,7 +157,7 @@ fn normalize(s: &str) -> Result<Target> {
         .or_else(|| v.strip_prefix("http://github.com/"))
         .or_else(|| v.strip_prefix("git@github.com:"))
         .unwrap_or(v);
-    if !Regex::new(r"^[\w.-]+/[\w.-]+$").unwrap().is_match(slug) {
+    if !TARGET_PATTERN.is_match(slug) {
         bail!("only GitHub OWNER/REPO slugs and github.com URLs are supported")
     }
     Ok(Target {
@@ -160,22 +165,29 @@ fn normalize(s: &str) -> Result<Target> {
         slug: slug.into(),
     })
 }
-fn cmd(p: &str, a: &[&str], cwd: Option<&Path>) -> Result<Output> {
-    let mut c = Command::new(p);
-    c.args(a);
+fn cmd(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Output> {
+    let mut command = Command::new(program);
+    command.args(args);
     if let Some(d) = cwd {
-        c.current_dir(d);
+        command.current_dir(d);
     }
-    let o = c.output().with_context(|| format!("run `{p}`"))?;
-    if !o.status.success() {
-        let e = String::from_utf8_lossy(if o.stderr.is_empty() {
-            &o.stdout
+    let output = command
+        .output()
+        .with_context(|| format!("run `{program}`"))?;
+    if !output.status.success() {
+        let details = String::from_utf8_lossy(if output.stderr.is_empty() {
+            &output.stdout
         } else {
-            &o.stderr
+            &output.stderr
         });
-        bail!("`{} {}` failed: {}", p, a.join(" "), e.trim())
+        bail!(
+            "`{} {}` failed: {}",
+            program,
+            args.join(" "),
+            details.trim()
+        )
     }
-    Ok(o)
+    Ok(output)
 }
 fn available(p: &str) -> bool {
     Command::new(p).arg("--version").output().is_ok()
@@ -245,22 +257,28 @@ fn dirty_refs(r: &Path, ns: &str) -> Result<Vec<String>> {
         .collect())
 }
 fn identity_hits(r: &Path) -> Result<usize> {
-    let re = Regex::new("(?i)claude|anthropic").unwrap();
     Ok(git(r, &["log", "--all", "--format=%an <%ae>|%cn <%ce>"])?
         .lines()
-        .filter(|x| re.is_match(x))
+        .filter(|identity| IDENTITY_PATTERN.is_match(identity))
         .count())
 }
-fn backup(r: &Path, slug: &str) -> Result<PathBuf> {
-    let d = dirs::home_dir()
+fn backup(repo: &Path, slug: &str) -> Result<PathBuf> {
+    let backup_dir = dirs::home_dir()
         .context("find home directory")?
         .join(".anticlaude-backups");
-    fs::create_dir_all(&d)?;
-    let n = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let p = d.join(format!("{}-{n}.bundle", slug.rsplit('/').next().unwrap()));
-    let s = p.to_string_lossy();
-    cmd("git", &["bundle", "create", &s, "--all"], Some(r))?;
-    Ok(p)
+    fs::create_dir_all(&backup_dir)?;
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let path = backup_dir.join(format!(
+        "{}-{timestamp}.bundle",
+        slug.rsplit('/').next().unwrap()
+    ));
+    let path_string = path.to_string_lossy();
+    cmd(
+        "git",
+        &["bundle", "create", &path_string, "--all"],
+        Some(repo),
+    )?;
+    Ok(path)
 }
 fn confirm(rewrite: bool) -> Result<()> {
     print!(
@@ -326,7 +344,7 @@ fn wait_clean(slug: &str) -> Result<bool> {
             return Ok(true);
         }
         if i == 0 {
-            println!("GitHub still reports {n} traces; waiting for indexing...")
+            println!("GitHub still reports {n} traces; waiting for indexing...");
         }
         thread::sleep(Duration::from_secs(5));
     }
@@ -402,13 +420,13 @@ fn flush(slug: &str) -> Result<()> {
     }
     bail!("could not restore branch `{d}`; rename `{t}` manually")
 }
-fn refresh_commit(r: &Path, amend: bool) -> Result<()> {
-    let b = git(r, &["branch", "--show-current"])?;
-    let n = git(r, &["log", "-1", "--format=%an"])?;
-    let e = git(r, &["log", "-1", "--format=%ae"])?;
-    let name_config = format!("user.name={n}");
-    let email_config = format!("user.email={e}");
-    let mut a = vec![
+fn refresh_commit(repo: &Path, amend: bool) -> Result<()> {
+    let branch = git(repo, &["branch", "--show-current"])?;
+    let author_name = git(repo, &["log", "-1", "--format=%an"])?;
+    let author_email = git(repo, &["log", "-1", "--format=%ae"])?;
+    let name_config = format!("user.name={author_name}");
+    let email_config = format!("user.email={author_email}");
+    let mut commit_args = vec![
         "-c",
         "commit.gpgsign=false",
         "-c",
@@ -418,16 +436,16 @@ fn refresh_commit(r: &Path, amend: bool) -> Result<()> {
         "commit",
     ];
     if amend {
-        a.extend(["--amend", "--allow-empty", "-m", REFRESH])
+        commit_args.extend(["--amend", "--allow-empty", "-m", REFRESH]);
     } else {
-        a.extend(["--allow-empty", "-m", REFRESH])
+        commit_args.extend(["--allow-empty", "-m", REFRESH]);
     }
-    cmd("git", &a, Some(r))?;
-    let mut p = vec!["push", "origin", &b];
+    cmd("git", &commit_args, Some(repo))?;
+    let mut push_args = vec!["push", "origin", &branch];
     if amend {
-        p.push("--force")
+        push_args.push("--force");
     }
-    cmd("git", &p, Some(r))?;
+    cmd("git", &push_args, Some(repo))?;
     Ok(())
 }
 fn logins(slug: &str) -> Result<Option<Vec<String>>> {
@@ -452,14 +470,13 @@ fn logins(slug: &str) -> Result<Option<Vec<String>>> {
     ))
 }
 fn refresh_graph(r: &Path, slug: &str) -> Result<()> {
-    let re = Regex::new("(?i)claude|anthropic").unwrap();
     for attempt in 0..3 {
         flush(slug)?;
         refresh_commit(r, attempt > 0)?;
         println!("Waiting for GitHub to rebuild the contributors graph...");
         for _ in 0..10 {
             if let Some(v) = logins(slug)? {
-                if !v.iter().any(|x| re.is_match(x)) {
+                if !v.iter().any(|login| IDENTITY_PATTERN.is_match(login)) {
                     return Ok(());
                 }
                 break;
@@ -469,43 +486,23 @@ fn refresh_graph(r: &Path, slug: &str) -> Result<()> {
     }
     bail!("history is clean, but GitHub's contributors graph is still stale")
 }
-pub(crate) fn prevent() -> Result<()> {
-    let p = dirs::home_dir()
-        .context("find home directory")?
-        .join(".claude/settings.json");
-    let mut v: Value = if p.exists() {
-        serde_json::from_str(&fs::read_to_string(&p)?)?
-    } else {
-        serde_json::json!({})
-    };
-    v.as_object_mut()
-        .context("settings must be a JSON object")?
-        .insert("includeCoAuthoredBy".into(), Value::Bool(false));
-    if let Some(d) = p.parent() {
-        fs::create_dir_all(d)?
-    }
-    fs::write(&p, format!("{}\n", serde_json::to_string_pretty(&v)?))?;
-    println!("Set includeCoAuthoredBy=false in {}", p.display());
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn slug() {
-        assert_eq!(normalize("owner/repo").unwrap().slug, "owner/repo")
+        assert_eq!(normalize("owner/repo").unwrap().slug, "owner/repo");
     }
     #[test]
     fn url() {
         assert_eq!(
             normalize("https://github.com/owner/repo.git").unwrap().slug,
             "owner/repo"
-        )
+        );
     }
     #[test]
     fn rejects() {
-        assert!(normalize("https://example.com/a/b").is_err())
+        assert!(normalize("https://example.com/a/b").is_err());
     }
 
     #[test]

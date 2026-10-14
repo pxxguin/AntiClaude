@@ -83,7 +83,8 @@ src/
 ├── main.rs  # minimal executable entry point
 ├── lib.rs   # library entry point and command dispatch
 ├── cli.rs   # command-line arguments and command model
-└── app.rs   # repository cleanup and GitHub refresh workflow
+├── app.rs   # repository cleanup and GitHub refresh workflow
+└── settings.rs # Claude Code attribution settings
 ```
 
 Keeping the executable entry point separate from the library allows the workflow to be tested and reused without invoking a subprocess.
