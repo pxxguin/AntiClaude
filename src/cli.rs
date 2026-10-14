@@ -1,65 +1,46 @@
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[allow(clippy::struct_excessive_bools)]
 #[command(
     name = "anticlaude",
     version,
-    about = "Remove Claude/AI attribution from a GitHub repository in one command"
+    about = "Safely remove Claude attribution from Git history"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
-    command: Option<Action>,
-    /// GitHub URL or OWNER/REPO slug
-    target: Option<String>,
-    /// Skip confirmation
-    #[arg(short = 'y', long)]
-    yes: bool,
-    /// Show the plan only
-    #[arg(long)]
-    dry_run: bool,
-    /// Skip contributors graph refresh
-    #[arg(long)]
-    no_refresh: bool,
-    /// Skip the restorable backup bundle
-    #[arg(long)]
-    no_backup: bool,
+    pub command: Command,
 }
 
 #[derive(Subcommand)]
-enum Action {
-    /// Disable future Claude Code attribution
-    Prevent,
-}
-
 pub(crate) enum Command {
+    /// Inspect or remove Claude attribution from repository history
     Clean(CleanOptions),
+    /// Experimentally refresh GitHub's cached Contributors graph
+    Refresh(RefreshOptions),
+    /// Disable future Claude Code attribution locally
     Prevent,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[derive(Args)]
 pub(crate) struct CleanOptions {
+    /// GitHub URL or OWNER/REPO slug
     pub target: String,
+    /// Skip the destructive-operation confirmation
+    #[arg(short = 'y', long)]
     pub yes: bool,
+    /// Show affected commits and refs without changing anything
+    #[arg(long)]
     pub dry_run: bool,
-    pub refresh: bool,
-    pub backup: bool,
+    /// Skip the restorable backup bundle
+    #[arg(long)]
+    pub no_backup: bool,
 }
 
-impl Cli {
-    pub(crate) fn into_command(self) -> Result<Command> {
-        if matches!(self.command, Some(Action::Prevent)) {
-            return Ok(Command::Prevent);
-        }
-        Ok(Command::Clean(CleanOptions {
-            target: self
-                .target
-                .context("provide a GitHub URL or OWNER/REPO slug")?,
-            yes: self.yes,
-            dry_run: self.dry_run,
-            refresh: !self.no_refresh,
-            backup: !self.no_backup,
-        }))
-    }
+#[derive(Args)]
+pub(crate) struct RefreshOptions {
+    /// GitHub URL or OWNER/REPO slug
+    pub target: String,
+    /// Confirm the experimental branch rename and empty commit
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }

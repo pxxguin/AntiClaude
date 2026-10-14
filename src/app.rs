@@ -22,7 +22,7 @@ text=message.decode('utf-8','replace'); out=[]
 for line in text.split('\n'):
  low=line.strip().lower()
  if low.startswith('co-authored-by:') and ('claude' in low or 'anthropic' in low): continue
- if low.startswith('🤖 generated with') or low.startswith('generated with claude'): continue
+ if low.startswith('🤖 generated with claude') or low.startswith('generated with claude'): continue
  line=re.sub(r'(?i)\s*co-authored-by:\s*[^\n]*(?:claude|anthropic)[^\n]*$','',line)
  line=re.sub(r'(?i)\s*🤖?\s*generated with claude(?: code)?[^\n]*','',line)
  line=re.sub(r'(?i)\s*<?noreply@anthropic\.com>?','',line)
@@ -35,15 +35,19 @@ struct Target {
     slug: String,
 }
 
-pub(crate) fn execute(options: &crate::cli::CleanOptions) -> Result<()> {
+struct RefUpdate {
+    remote_ref: String,
+    local_ref: String,
+    expected_sha: String,
+}
+
+pub(crate) fn clean(options: &crate::cli::CleanOptions) -> Result<()> {
     let target = normalize(&options.target)?;
     require("git", &["--version"])?;
     require("git-filter-repo", &["--version"])?;
     let gh = available("gh");
     if gh {
         cmd("gh", &["auth", "status"], None).context("authenticate first with `gh auth login`")?;
-    } else if options.refresh {
-        bail!("GitHub CLI `gh` is required for the contributors graph refresh")
     }
     let temp = TempDir::new()?;
     let repo = temp.path().join(target.slug.rsplit('/').next().unwrap());
@@ -80,6 +84,7 @@ pub(crate) fn execute(options: &crate::cli::CleanOptions) -> Result<()> {
         show(&branches),
         show(&tags)
     );
+    print_trace_preview(&repo, hit_count)?;
     let identities = identity_hits(&repo)?;
     if identities > 0 {
         println!("  warning: {identities} Claude author/committer identities are not rewritten");
@@ -92,17 +97,49 @@ pub(crate) fn execute(options: &crate::cli::CleanOptions) -> Result<()> {
         confirm(hit_count > 0)?;
     }
     if hit_count > 0 {
-        rewrite_and_push(&repo, &target.slug, &branches, &tags, options.backup)?;
-        if options.refresh && !wait_clean(&target.slug)? {
-            bail!("clean history was pushed, but GitHub is still indexing it; rerun shortly to refresh the graph")
-        }
+        rewrite_and_push(&repo, &target.slug, &branches, &tags, !options.no_backup)?;
     }
-    if options.refresh {
-        refresh_graph(&repo, &target.slug)?;
-        println!("\nDone. History and contributors graph are clean.");
-    } else {
-        println!("\nDone. Graph refresh skipped.");
+    println!("\nDone. Repository history is clean.");
+    Ok(())
+}
+
+pub(crate) fn refresh(options: &crate::cli::RefreshOptions) -> Result<()> {
+    let target = normalize(&options.target)?;
+    require("git", &["--version"])?;
+    require("gh", &["--version"])?;
+    cmd("gh", &["auth", "status"], None).context("authenticate first with `gh auth login`")?;
+
+    eprintln!("WARNING: refresh is experimental and will temporarily rename the default branch");
+    eprintln!(
+        "and push one empty commit. GitHub does not guarantee that this refreshes its cache."
+    );
+    if !options.yes {
+        confirm_refresh()?;
     }
+    if server_hits(&target.slug)? != 0 {
+        bail!(
+            "repository history still contains Claude traces; run `anticlaude clean {}` first",
+            target.slug
+        )
+    }
+
+    let temp = TempDir::new()?;
+    let repo = temp.path().join(target.slug.rsplit('/').next().unwrap());
+    let repo_path = repo.to_string_lossy();
+    cmd(
+        "gh",
+        &[
+            "repo",
+            "clone",
+            &target.slug,
+            &repo_path,
+            "--",
+            "--no-single-branch",
+        ],
+        None,
+    )?;
+    refresh_graph(&repo, &target.slug)?;
+    println!("\nRefresh completed. GitHub may still take time to update contributor statistics.");
     Ok(())
 }
 
@@ -119,6 +156,7 @@ fn rewrite_and_push(
         println!("Warning: backup disabled.");
     }
     let origin = git(repo, &["remote", "get-url", "origin"])?;
+    let updates = planned_updates(repo, branches, tags)?;
     cmd(
         "git",
         &["filter-repo", "--force", "--message-callback", CALLBACK],
@@ -133,20 +171,64 @@ fn rewrite_and_push(
         &["remote", "add", "origin", origin.trim()],
         Some(repo),
     )?;
-    for branch in branches {
-        println!("Force-pushing branch {branch}...");
-        cmd("git", &["push", "origin", branch, "--force"], Some(repo))
-            .with_context(|| format!("push {branch}; check branch protection"))?;
+    atomic_push(repo, &updates).context(
+        "atomic push rejected; no refs were updated. The remote may have changed, or a protection rule may block rewriting",
+    )?;
+    Ok(())
+}
+
+fn planned_updates(repo: &Path, branches: &[String], tags: &[String]) -> Result<Vec<RefUpdate>> {
+    branches
+        .iter()
+        .map(|name| (format!("refs/heads/{name}"), name.clone()))
+        .chain(tags.iter().map(|name| {
+            let reference = format!("refs/tags/{name}");
+            (reference.clone(), reference)
+        }))
+        .map(|(remote_ref, local_ref)| {
+            let expected_sha = remote_ref_sha(repo, &remote_ref)?;
+            Ok(RefUpdate {
+                remote_ref,
+                local_ref,
+                expected_sha,
+            })
+        })
+        .collect()
+}
+
+fn remote_ref_sha(repo: &Path, reference: &str) -> Result<String> {
+    let output = git(repo, &["ls-remote", "origin", reference])?;
+    output
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+        .with_context(|| format!("remote ref `{reference}` disappeared before rewriting"))
+}
+
+fn atomic_push(repo: &Path, updates: &[RefUpdate]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
     }
-    for tag in tags {
-        println!("Force-pushing tag {tag}...");
-        cmd(
-            "git",
-            &["push", "origin", &format!("refs/tags/{tag}"), "--force"],
-            Some(repo),
-        )
-        .with_context(|| format!("push tag {tag}; check tag protection"))?;
+    let mut owned = vec![
+        "push".to_owned(),
+        "--atomic".to_owned(),
+        "origin".to_owned(),
+    ];
+    for update in updates {
+        owned.push(format!(
+            "--force-with-lease={}:{}",
+            update.remote_ref, update.expected_sha
+        ));
     }
+    for update in updates {
+        owned.push(format!("{}:{}", update.local_ref, update.remote_ref));
+    }
+    let args: Vec<_> = owned.iter().map(String::as_str).collect();
+    let mut dry_run = args.clone();
+    dry_run.insert(1, "--dry-run");
+    cmd("git", &dry_run, Some(repo))?;
+    println!("Atomically updating {} affected ref(s)...", updates.len());
+    cmd("git", &args, Some(repo))?;
     Ok(())
 }
 
@@ -250,6 +332,34 @@ fn hits(r: &Path, reference: &str) -> Result<usize> {
     .lines()
     .count())
 }
+fn print_trace_preview(repo: &Path, total: usize) -> Result<()> {
+    if total == 0 {
+        return Ok(());
+    }
+    let commits = git(
+        repo,
+        &[
+            "log",
+            "--all",
+            "-i",
+            "-E",
+            "--grep=co-authored-by:.*(claude|anthropic)",
+            "--grep=generated with claude",
+            "--grep=noreply@anthropic",
+            "--format=%h%x09%s",
+            "-n",
+            "20",
+        ],
+    )?;
+    println!("  commit message preview:");
+    for commit in commits.lines() {
+        println!("    {commit}");
+    }
+    if total > 20 {
+        println!("    ... and {} more", total - 20);
+    }
+    Ok(())
+}
 fn dirty_refs(r: &Path, ns: &str) -> Result<Vec<String>> {
     Ok(refs(r, ns)?
         .into_iter()
@@ -282,13 +392,24 @@ fn backup(repo: &Path, slug: &str) -> Result<PathBuf> {
 }
 fn confirm(rewrite: bool) -> Result<()> {
     print!(
-        "This will {}force-push and refresh GitHub's cache. Type `yes`: ",
-        if rewrite { "rewrite history, " } else { "" }
+        "This will {}update affected remote refs atomically. Type `yes`: ",
+        if rewrite { "rewrite history and " } else { "" }
     );
     io::stdout().flush()?;
     let mut s = String::new();
     io::stdin().read_line(&mut s)?;
     if !matches!(s.trim().to_lowercase().as_str(), "y" | "yes") {
+        bail!("aborted")
+    }
+    Ok(())
+}
+
+fn confirm_refresh() -> Result<()> {
+    print!("Type `refresh` to accept the experimental branch rename and empty commit: ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if answer.trim() != "refresh" {
         bail!("aborted")
     }
     Ok(())
@@ -336,19 +457,6 @@ fn server_hits(slug: &str) -> Result<usize> {
         .sum::<usize>();
     }
     Ok(n)
-}
-fn wait_clean(slug: &str) -> Result<bool> {
-    for i in 0..6 {
-        let n = server_hits(slug)?;
-        if n == 0 {
-            return Ok(true);
-        }
-        if i == 0 {
-            println!("GitHub still reports {n} traces; waiting for indexing...");
-        }
-        thread::sleep(Duration::from_secs(5));
-    }
-    Ok(false)
 }
 fn exists(slug: &str, b: &str) -> bool {
     cmd("gh", &["api", &format!("repos/{slug}/branches/{b}")], None).is_ok()
@@ -523,9 +631,9 @@ mod tests {
                 "user.email=test@example.com",
                 "commit",
                 "-m",
-                "feat: keep this",
+                "feat: 유니코드 메시지를 보존한다",
                 "-m",
-                "Co-Authored-By: Claude <noreply@anthropic.com>",
+                "Co-Authored-By: Human <human@example.com>\nCo-Authored-By: Claude <noreply@anthropic.com>",
             ],
             Some(temp.path()),
         )
@@ -537,7 +645,8 @@ mod tests {
         )
         .unwrap();
         let message = git(temp.path(), &["log", "-1", "--format=%B"]).unwrap();
-        assert!(message.contains("feat: keep this"));
+        assert!(message.contains("feat: 유니코드 메시지를 보존한다"));
+        assert!(message.contains("Co-Authored-By: Human <human@example.com>"));
         assert!(!Regex::new("(?i)claude|anthropic")
             .unwrap()
             .is_match(&message));
@@ -581,5 +690,117 @@ mod tests {
             git(&work, &["rev-parse", "HEAD"]).unwrap(),
             git(&work, &["rev-parse", "origin/main"]).unwrap()
         );
+    }
+
+    #[test]
+    fn atomic_push_rejects_concurrent_remote_change_without_partial_update() {
+        let temp = TempDir::new().unwrap();
+        let remote = temp.path().join("remote.git");
+        let work = temp.path().join("work");
+        let concurrent = temp.path().join("concurrent");
+        let remote_path = remote.to_string_lossy();
+        let work_path = work.to_string_lossy();
+        let concurrent_path = concurrent.to_string_lossy();
+        cmd("git", &["init", "--bare", "-b", "main", &remote_path], None).unwrap();
+        cmd("git", &["clone", &remote_path, &work_path], None).unwrap();
+        commit_file(&work, "base.txt", "base", "base");
+        cmd("git", &["push", "origin", "main"], Some(&work)).unwrap();
+        cmd("git", &["switch", "-c", "develop"], Some(&work)).unwrap();
+        commit_file(&work, "develop.txt", "initial", "develop");
+        cmd("git", &["push", "origin", "develop"], Some(&work)).unwrap();
+        cmd("git", &["switch", "main"], Some(&work)).unwrap();
+
+        let updates = planned_updates(&work, &["main".into(), "develop".into()], &[]).unwrap();
+        let main_before = remote_sha(&remote, "refs/heads/main");
+        commit_file(&work, "main.txt", "local", "local main");
+        cmd("git", &["switch", "develop"], Some(&work)).unwrap();
+        commit_file(&work, "develop.txt", "local", "local develop");
+
+        cmd("git", &["clone", &remote_path, &concurrent_path], None).unwrap();
+        cmd("git", &["switch", "develop"], Some(&concurrent)).unwrap();
+        commit_file(&concurrent, "remote.txt", "remote", "concurrent change");
+        cmd("git", &["push", "origin", "develop"], Some(&concurrent)).unwrap();
+
+        assert!(atomic_push(&work, &updates).is_err());
+        assert_eq!(remote_sha(&remote, "refs/heads/main"), main_before);
+    }
+
+    #[test]
+    fn atomic_push_updates_annotated_tag_and_branch_together() {
+        if !available("git-filter-repo") {
+            return;
+        }
+        let temp = TempDir::new().unwrap();
+        let remote = temp.path().join("remote.git");
+        let work = temp.path().join("work");
+        let remote_path = remote.to_string_lossy();
+        let work_path = work.to_string_lossy();
+        cmd("git", &["init", "--bare", "-b", "main", &remote_path], None).unwrap();
+        cmd("git", &["clone", &remote_path, &work_path], None).unwrap();
+        commit_file(
+            &work,
+            "release.txt",
+            "release",
+            "release\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+        );
+        cmd(
+            "git",
+            &[
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=test@example.com",
+                "tag",
+                "-a",
+                "v1.0.0",
+                "-m",
+                "release",
+            ],
+            Some(&work),
+        )
+        .unwrap();
+        cmd(
+            "git",
+            &["push", "origin", "main", "refs/tags/v1.0.0"],
+            Some(&work),
+        )
+        .unwrap();
+        let updates = planned_updates(&work, &["main".into()], &["v1.0.0".into()]).unwrap();
+        let origin = git(&work, &["remote", "get-url", "origin"]).unwrap();
+
+        cmd(
+            "git",
+            &["filter-repo", "--force", "--message-callback", CALLBACK],
+            Some(&work),
+        )
+        .unwrap();
+        cmd("git", &["remote", "add", "origin", &origin], Some(&work)).unwrap();
+        atomic_push(&work, &updates).unwrap();
+
+        assert_eq!(hits(&remote, "--all").unwrap(), 0);
+        assert!(!remote_sha(&remote, "refs/tags/v1.0.0").is_empty());
+    }
+
+    fn commit_file(repo: &Path, name: &str, content: &str, message: &str) {
+        fs::write(repo.join(name), content).unwrap();
+        cmd("git", &["add", name], Some(repo)).unwrap();
+        cmd(
+            "git",
+            &[
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                message,
+            ],
+            Some(repo),
+        )
+        .unwrap();
+    }
+
+    fn remote_sha(remote: &Path, reference: &str) -> String {
+        git(remote, &["rev-parse", reference]).unwrap()
     }
 }

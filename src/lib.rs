@@ -11,8 +11,9 @@ use clap::Parser;
 ///
 /// Returns an error when arguments are incomplete or an external operation fails.
 pub fn run() -> Result<()> {
-    match cli::Cli::parse().into_command()? {
-        cli::Command::Clean(options) => app::execute(&options),
+    match cli::Cli::parse().command {
+        cli::Command::Clean(options) => app::clean(&options),
+        cli::Command::Refresh(options) => app::refresh(&options),
         cli::Command::Prevent => settings::prevent_attribution(),
     }
 }
