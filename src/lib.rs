@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod rewrite;
 mod settings;
 
 use anyhow::Result;

@@ -17,18 +17,6 @@ static TARGET_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[\w.-]+/[\w.-]+$").unwrap());
 static IDENTITY_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new("(?i)claude|anthropic").unwrap());
-const CALLBACK: &str = r"import re
-text=message.decode('utf-8','replace'); out=[]
-for line in text.split('\n'):
- low=line.strip().lower()
- if low.startswith('co-authored-by:') and ('claude' in low or 'anthropic' in low): continue
- if low.startswith('🤖 generated with claude') or low.startswith('generated with claude'): continue
- line=re.sub(r'(?i)\s*co-authored-by:\s*[^\n]*(?:claude|anthropic)[^\n]*$','',line)
- line=re.sub(r'(?i)\s*🤖?\s*generated with claude(?: code)?[^\n]*','',line)
- line=re.sub(r'(?i)\s*<?noreply@anthropic\.com>?','',line)
- if low and not line.strip(): continue
- out.append(line)
-return (re.sub(r'\n{3,}','\n\n','\n'.join(out)).rstrip('\n')+'\n').encode('utf-8')";
 
 struct Target {
     url: String,
@@ -44,11 +32,7 @@ struct RefUpdate {
 pub(crate) fn clean(options: &crate::cli::CleanOptions) -> Result<()> {
     let target = normalize(&options.target)?;
     require("git", &["--version"])?;
-    require_git_filter_repo()?;
-    let gh = available("gh");
-    if gh {
-        cmd("gh", &["auth", "status"], None).context("authenticate first with `gh auth login`")?;
-    }
+    let gh = available("gh") && cmd("gh", &["auth", "status"], None).is_ok();
     let temp = TempDir::new()?;
     let repo = temp.path().join(target.slug.rsplit('/').next().unwrap());
     let rp = repo.to_string_lossy();
@@ -157,12 +141,15 @@ fn rewrite_and_push(
     }
     let origin = git(repo, &["remote", "get-url", "origin"])?;
     let updates = planned_updates(repo, branches, tags)?;
-    cmd(
-        "git",
-        &["filter-repo", "--force", "--message-callback", CALLBACK],
-        Some(repo),
-    )?;
-    if hits(repo, "--all")? > 0 {
+    let report = crate::rewrite::rewrite_repository(repo)?;
+    println!("Rewrote {} commit message(s).", report.commits_rewritten);
+    if report.signed_commits_stripped + report.signed_tags_stripped > 0 {
+        println!(
+            "Warning: removed invalidated signatures from {} commit(s) and {} tag(s).",
+            report.signed_commits_stripped, report.signed_tags_stripped
+        );
+    }
+    if !crate::rewrite::traced_commits(repo, &["--branches", "--tags"])?.is_empty() {
         bail!("traces remain after rewriting; refusing to push")
     }
     let _ = cmd("git", &["remote", "remove", "origin"], Some(repo));
@@ -279,17 +266,6 @@ fn require(p: &str, a: &[&str]) -> Result<()> {
         .map(|_| ())
         .with_context(|| format!("required command `{p}` is unavailable"))
 }
-fn require_git_filter_repo() -> Result<()> {
-    cmd("git", &["filter-repo", "--version"], None)
-        .map(|_| ())
-        .context(
-        "`git filter-repo` is unavailable; install it with `python -m pip install git-filter-repo`",
-    )
-}
-#[cfg(test)]
-fn git_filter_repo_available() -> bool {
-    cmd("git", &["filter-repo", "--version"], None).is_ok()
-}
 fn git(r: &Path, a: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&cmd("git", a, Some(r))?.stdout)
         .trim()
@@ -327,44 +303,17 @@ fn materialize(r: &Path) -> Result<()> {
     Ok(())
 }
 fn hits(r: &Path, reference: &str) -> Result<usize> {
-    Ok(git(
-        r,
-        &[
-            "log",
-            reference,
-            "-i",
-            "-E",
-            "--grep=co-authored-by:.*(claude|anthropic)",
-            "--grep=generated with claude",
-            "--grep=noreply@anthropic",
-            "--format=%H",
-        ],
-    )?
-    .lines()
-    .count())
+    Ok(crate::rewrite::traced_commits(r, &[reference])?.len())
 }
 fn print_trace_preview(repo: &Path, total: usize) -> Result<()> {
     if total == 0 {
         return Ok(());
     }
-    let commits = git(
-        repo,
-        &[
-            "log",
-            "--all",
-            "-i",
-            "-E",
-            "--grep=co-authored-by:.*(claude|anthropic)",
-            "--grep=generated with claude",
-            "--grep=noreply@anthropic",
-            "--format=%h%x09%s",
-            "-n",
-            "20",
-        ],
-    )?;
+    let traced = crate::rewrite::traced_commits(repo, &["--all"])?;
     println!("  commit message preview:");
-    for commit in commits.lines() {
-        println!("    {commit}");
+    for commit in traced.iter().take(20) {
+        let summary = git(repo, &["show", "-s", "--format=%h%x09%s", commit])?;
+        println!("    {summary}");
     }
     if total > 20 {
         println!("    ... and {} more", total - 20);
@@ -626,9 +575,6 @@ mod tests {
 
     #[test]
     fn rewrite_removes_trace_and_preserves_message() {
-        if !git_filter_repo_available() {
-            return;
-        }
         let temp = TempDir::new().unwrap();
         cmd("git", &["init", "-b", "main"], Some(temp.path())).unwrap();
         fs::write(temp.path().join("file.txt"), "content").unwrap();
@@ -649,12 +595,7 @@ mod tests {
             Some(temp.path()),
         )
         .unwrap();
-        cmd(
-            "git",
-            &["filter-repo", "--force", "--message-callback", CALLBACK],
-            Some(temp.path()),
-        )
-        .unwrap();
+        crate::rewrite::rewrite_repository(temp.path()).unwrap();
         let message = git(temp.path(), &["log", "-1", "--format=%B"]).unwrap();
         assert!(message.contains("feat: 유니코드 메시지를 보존한다"));
         assert!(message.contains("Co-Authored-By: Human <human@example.com>"));
@@ -738,9 +679,6 @@ mod tests {
 
     #[test]
     fn atomic_push_updates_annotated_tag_and_branch_together() {
-        if !git_filter_repo_available() {
-            return;
-        }
         let temp = TempDir::new().unwrap();
         let remote = temp.path().join("remote.git");
         let work = temp.path().join("work");
@@ -776,20 +714,67 @@ mod tests {
             Some(&work),
         )
         .unwrap();
-        let updates = planned_updates(&work, &["main".into()], &["v1.0.0".into()]).unwrap();
-        let origin = git(&work, &["remote", "get-url", "origin"]).unwrap();
-
-        cmd(
-            "git",
-            &["filter-repo", "--force", "--message-callback", CALLBACK],
-            Some(&work),
+        rewrite_and_push(
+            &work,
+            "owner/repo",
+            &["main".into()],
+            &["v1.0.0".into()],
+            false,
         )
         .unwrap();
-        cmd("git", &["remote", "add", "origin", &origin], Some(&work)).unwrap();
-        atomic_push(&work, &updates).unwrap();
 
         assert_eq!(hits(&remote, "--all").unwrap(), 0);
         assert!(!remote_sha(&remote, "refs/tags/v1.0.0").is_empty());
+    }
+
+    #[test]
+    fn clean_history_keeps_the_same_commit_id() {
+        let temp = TempDir::new().unwrap();
+        cmd("git", &["init", "-b", "main"], Some(temp.path())).unwrap();
+        commit_file(temp.path(), "clean.txt", "clean", "feat: clean history");
+        let before = git(temp.path(), &["rev-parse", "HEAD"]).unwrap();
+        let report = crate::rewrite::rewrite_repository(temp.path()).unwrap();
+        assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!(report.commits_rewritten, 0);
+    }
+
+    #[test]
+    fn rewrite_preserves_merge_topology() {
+        let temp = TempDir::new().unwrap();
+        cmd("git", &["init", "-b", "main"], Some(temp.path())).unwrap();
+        commit_file(temp.path(), "base.txt", "base", "base");
+        cmd("git", &["switch", "-c", "feature"], Some(temp.path())).unwrap();
+        commit_file(
+            temp.path(),
+            "feature.txt",
+            "feature",
+            "feature\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+        );
+        cmd("git", &["switch", "main"], Some(temp.path())).unwrap();
+        commit_file(temp.path(), "main.txt", "main", "main work");
+        cmd(
+            "git",
+            &[
+                "-c",
+                "user.name=Tester",
+                "-c",
+                "user.email=test@example.com",
+                "merge",
+                "--no-ff",
+                "feature",
+                "-m",
+                "merge feature",
+            ],
+            Some(temp.path()),
+        )
+        .unwrap();
+
+        crate::rewrite::rewrite_repository(temp.path()).unwrap();
+
+        cmd("git", &["fsck", "--no-dangling"], Some(temp.path())).unwrap();
+        let parents = git(temp.path(), &["rev-list", "--parents", "-1", "main"]).unwrap();
+        assert_eq!(parents.split_whitespace().count(), 3);
+        assert_eq!(hits(temp.path(), "--all").unwrap(), 0);
     }
 
     fn commit_file(repo: &Path, name: &str, content: &str, message: &str) {

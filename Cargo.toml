@@ -1,9 +1,9 @@
 [package]
 name = "anticlaude"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = ["pxxguin"]
-description = "Remove Claude attribution from GitHub repository history and refresh contributors"
+description = "Safely remove Claude attribution from GitHub repository history"
 license = "MIT"
 repository = "https://github.com/pxxguin/AntiClaude"
 
