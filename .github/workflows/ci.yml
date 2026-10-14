@@ -17,14 +17,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Install integration-test dependency
-        run: python -m pip install git-filter-repo
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
