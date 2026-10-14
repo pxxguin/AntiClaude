@@ -3,7 +3,6 @@ use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -143,7 +142,6 @@ fn clean(target: Target, yes: bool, dry: bool, refresh: bool, backup_enabled: bo
             println!("Warning: backup disabled.")
         }
         let origin = git(&repo, &["remote", "get-url", "origin"])?;
-        let old_tags = remote_tags(&repo)?;
         cmd(
             "git",
             &["filter-repo", "--force", "--message-callback", CALLBACK],
@@ -158,16 +156,12 @@ fn clean(target: Target, yes: bool, dry: bool, refresh: bool, backup_enabled: bo
             &["remote", "add", "origin", origin.trim()],
             Some(&repo),
         )?;
-        let remote: BTreeSet<_> = remote_branches(&repo)?.into_iter().collect();
-        for b in refs(&repo, "refs/heads")?
-            .into_iter()
-            .filter(|b| remote.contains(b))
-        {
+        for b in &branches {
             println!("Force-pushing branch {b}...");
-            cmd("git", &["push", "origin", &b, "--force"], Some(&repo))
+            cmd("git", &["push", "origin", b, "--force"], Some(&repo))
                 .with_context(|| format!("push {b}; check branch protection"))?;
         }
-        for t in moved_tags(&repo, &old_tags)? {
+        for t in &tags {
             println!("Force-pushing tag {t}...");
             cmd(
                 "git",
@@ -294,30 +288,6 @@ fn identity_hits(r: &Path) -> Result<usize> {
         .lines()
         .filter(|x| re.is_match(x))
         .count())
-}
-fn remote_tags(r: &Path) -> Result<BTreeMap<String, String>> {
-    let mut m = BTreeMap::new();
-    for l in git(r, &["ls-remote", "--tags", "origin"])?.lines() {
-        if let Some((sha, n)) = l.split_once('\t') {
-            if let Some(n) = n.strip_prefix("refs/tags/") {
-                m.entry(n.trim_end_matches("^{}").into())
-                    .or_insert(sha.into());
-            }
-        }
-    }
-    Ok(m)
-}
-fn moved_tags(r: &Path, old: &BTreeMap<String, String>) -> Result<Vec<String>> {
-    let mut v = vec![];
-    for t in refs(r, "refs/tags")? {
-        if old
-            .get(&t)
-            .is_some_and(|s| git(r, &["rev-parse", &t]).is_ok_and(|n| n != *s))
-        {
-            v.push(t)
-        }
-    }
-    Ok(v)
 }
 fn backup(r: &Path, slug: &str) -> Result<PathBuf> {
     let d = dirs::home_dir()
@@ -451,7 +421,7 @@ fn flush(slug: &str) -> Result<()> {
                 None,
             )?;
             if exists(slug, &t) {
-                cmd(
+                let _ = cmd(
                     "gh",
                     &[
                         "api",
@@ -460,7 +430,7 @@ fn flush(slug: &str) -> Result<()> {
                         &format!("repos/{slug}/git/refs/heads/{t}"),
                     ],
                     None,
-                )?;
+                );
             }
             return Ok(());
         }
