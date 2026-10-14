@@ -44,7 +44,7 @@ struct RefUpdate {
 pub(crate) fn clean(options: &crate::cli::CleanOptions) -> Result<()> {
     let target = normalize(&options.target)?;
     require("git", &["--version"])?;
-    require("git-filter-repo", &["--version"])?;
+    require_git_filter_repo()?;
     let gh = available("gh");
     if gh {
         cmd("gh", &["auth", "status"], None).context("authenticate first with `gh auth login`")?;
@@ -278,6 +278,17 @@ fn require(p: &str, a: &[&str]) -> Result<()> {
     cmd(p, a, None)
         .map(|_| ())
         .with_context(|| format!("required command `{p}` is unavailable"))
+}
+fn require_git_filter_repo() -> Result<()> {
+    cmd("git", &["filter-repo", "--version"], None)
+        .map(|_| ())
+        .context(
+        "`git filter-repo` is unavailable; install it with `python -m pip install git-filter-repo`",
+    )
+}
+#[cfg(test)]
+fn git_filter_repo_available() -> bool {
+    cmd("git", &["filter-repo", "--version"], None).is_ok()
 }
 fn git(r: &Path, a: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&cmd("git", a, Some(r))?.stdout)
@@ -615,7 +626,7 @@ mod tests {
 
     #[test]
     fn rewrite_removes_trace_and_preserves_message() {
-        if !available("git-filter-repo") {
+        if !git_filter_repo_available() {
             return;
         }
         let temp = TempDir::new().unwrap();
@@ -727,7 +738,7 @@ mod tests {
 
     #[test]
     fn atomic_push_updates_annotated_tag_and_branch_together() {
-        if !available("git-filter-repo") {
+        if !git_filter_repo_available() {
             return;
         }
         let temp = TempDir::new().unwrap();
