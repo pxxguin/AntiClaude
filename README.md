@@ -8,9 +8,9 @@
   Remove Claude and Anthropic attribution from a GitHub repository in one command.
 </p>
 
-**AntiClaude is a Rust CLI that cleans AI attribution from Git history, updates the affected remote refs, and refreshes GitHub's Contributors graph.**
+**AntiClaude is a Rust CLI that cleans AI attribution from Git history and safely updates affected remote refs.**
 
-Claude Code can add `Co-Authored-By` trailers and generation notices to commit messages. Removing them from the latest commit is not enough: older commits, branches, tags, and GitHub's cached contributor statistics may still retain the attribution. AntiClaude handles the complete cleanup workflow without modifying the repository's file contents or human authorship.
+Claude Code can add `Co-Authored-By` trailers and generation notices to commit messages. Removing them from the latest commit is not enough: older commits, branches, and tags may still retain the attribution. AntiClaude handles the cleanup workflow without modifying the repository's file contents or human authorship. An experimental, explicitly selected command is available for attempting to refresh GitHub's cached contributor statistics.
 
 ## Get Started
 
@@ -30,7 +30,9 @@ gh auth login
 
 ### Install
 
-From this repository:
+Prebuilt archives for Linux, macOS, and Windows are published on the [Releases page](https://github.com/pxxguin/AntiClaude/releases).
+
+To build and install from this repository:
 
 ```sh
 cargo install --path .
@@ -41,11 +43,11 @@ cargo install --path .
 Pass a GitHub `OWNER/REPO` slug or full repository URL:
 
 ```sh
-anticlaude OWNER/REPO
+anticlaude clean OWNER/REPO
 ```
 
 ```sh
-anticlaude https://github.com/OWNER/REPO
+anticlaude clean https://github.com/OWNER/REPO
 ```
 
 AntiClaude clones the repository into a temporary directory, shows the affected branches and tags, and asks for confirmation before changing the remote.
@@ -58,10 +60,9 @@ One command performs the full cleanup sequence:
 2. Detects Claude and Anthropic traces across all branches and tags.
 3. Creates a restorable Git bundle in `~/.anticlaude-backups/`.
 4. Rewrites matching commit messages with `git-filter-repo`.
-5. Force-pushes affected branches and tags.
-6. Waits until GitHub has indexed the rewritten history.
-7. Refreshes and verifies the Contributors graph.
-8. Deletes the temporary local clone.
+5. Verifies that the remote refs have not changed since cloning.
+6. Updates every affected branch and tag in one atomic push.
+7. Deletes the temporary local clone.
 
 AntiClaude removes message attribution such as:
 
@@ -77,25 +78,25 @@ It does not modify tracked files or replace commit author and committer identiti
 Preview the operation without changing anything:
 
 ```sh
-anticlaude OWNER/REPO --dry-run
+anticlaude clean OWNER/REPO --dry-run
 ```
 
 Skip the confirmation prompt:
 
 ```sh
-anticlaude OWNER/REPO --yes
+anticlaude clean OWNER/REPO --yes
 ```
 
-Skip the Contributors graph refresh:
+Experimentally refresh GitHub's Contributors graph after cleaning:
 
 ```sh
-anticlaude OWNER/REPO --no-refresh
+anticlaude refresh OWNER/REPO
 ```
 
 Skip the backup bundle:
 
 ```sh
-anticlaude OWNER/REPO --no-backup
+anticlaude clean OWNER/REPO --no-backup
 ```
 
 Prevent Claude Code from adding attribution to future commits:
@@ -112,13 +113,15 @@ anticlaude --help
 
 ## Safety
 
-History rewriting changes commit IDs and requires force-pushing. Use AntiClaude only on repositories where you are authorized to rewrite history.
+History rewriting changes commit IDs and requires force-pushing. Use AntiClaude only on repositories where you are authorized to rewrite history. Contributors refresh is intentionally separate because it temporarily renames the default branch and creates an empty commit.
 
 - A backup bundle is created before rewriting unless `--no-backup` is supplied.
+- A single atomic push prevents a repository from being left with only some refs updated.
+- Explicit force-with-lease checks prevent overwriting refs changed after AntiClaude cloned the repository.
 - Protected branches, protected tags, and repository rulesets may reject the push.
 - Collaborators must synchronize their local clones after rewritten history is pushed.
 - Annotated release tags may receive new object IDs, while GitHub release assets remain associated with their tag names.
-- GitHub contributor statistics are cached and may take time to settle after a force-push.
+- `anticlaude refresh` is experimental; GitHub does not guarantee cache invalidation and statistics may take time to settle.
 - Forks generally should not be rewritten when they must remain compatible with their upstream repository.
 
 Restore refs from a backup bundle with:
