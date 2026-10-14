@@ -10,30 +10,28 @@
 
 **AntiClaude is a Rust CLI that cleans AI attribution from Git history and safely updates affected remote refs.**
 
-Claude Code can add `Co-Authored-By` trailers and generation notices to commit messages. Removing them from the latest commit is not enough: older commits, branches, and tags may still retain the attribution. AntiClaude handles the cleanup workflow without modifying the repository's file contents or human authorship. An experimental, explicitly selected command is available for attempting to refresh GitHub's cached contributor statistics.
+Claude Code can add `Co-Authored-By` trailers and generation notices to commit messages. Removing them from the latest commit is not enough: older commits, branches, and tags may still retain the attribution. AntiClaude handles the cleanup workflow without modifying the repository's file contents or human authorship. Its history-rewrite engine is implemented in Rust and requires no Python tooling. An experimental, explicitly selected command is available for attempting to refresh GitHub's cached contributor statistics.
 
 ## Get Started
 
 ### Requirements
 
 - [Git](https://git-scm.com/)
-- [`git-filter-repo`](https://github.com/newren/git-filter-repo)
-- [GitHub CLI](https://cli.github.com/), authenticated with `gh auth login`
+- Optional: [GitHub CLI](https://cli.github.com/), authenticated with `gh auth login`, for private repositories and `anticlaude refresh`
 - Rust 1.85 or newer only when building from source
 
 #### macOS
 
 ```sh
-brew install git-filter-repo gh
+brew install git gh
 gh auth login
 ```
 
 #### Linux
 
-Install Git and Python with your distribution's package manager, install GitHub CLI using its [official Linux instructions](https://github.com/cli/cli/blob/trunk/docs/install_linux.md), then run:
+Install Git with your distribution's package manager and install GitHub CLI using its [official Linux instructions](https://github.com/cli/cli/blob/trunk/docs/install_linux.md), then run:
 
 ```sh
-python3 -m pip install --user git-filter-repo
 gh auth login
 ```
 
@@ -44,11 +42,10 @@ Run the following in PowerShell or Windows Terminal:
 ```powershell
 winget install --id Git.Git -e
 winget install --id GitHub.cli -e
-py -m pip install git-filter-repo
 gh auth login
 ```
 
-Open a new terminal after installation so `git`, `git filter-repo`, and `gh` are available on `PATH`.
+Open a new terminal after installation so `git` and `gh` are available on `PATH`.
 
 ### Install
 
@@ -81,7 +78,7 @@ One command performs the full cleanup sequence:
 1. Clones every remote branch into a temporary working directory.
 2. Detects Claude and Anthropic traces across all branches and tags.
 3. Creates a restorable Git bundle in `~/.anticlaude-backups/`.
-4. Rewrites matching commit messages with `git-filter-repo`.
+4. Rewrites Git commit and annotated-tag objects with the built-in Rust engine.
 5. Verifies that the remote refs have not changed since cloning.
 6. Updates every affected branch and tag in one atomic push.
 7. Deletes the temporary local clone.
@@ -143,6 +140,7 @@ History rewriting changes commit IDs and requires force-pushing. Use AntiClaude 
 - Protected branches, protected tags, and repository rulesets may reject the push.
 - Collaborators must synchronize their local clones after rewritten history is pushed.
 - Annotated release tags may receive new object IDs, while GitHub release assets remain associated with their tag names.
+- Cryptographic commit and tag signatures cannot survive a history rewrite. AntiClaude removes only signatures invalidated by changed messages or parent IDs and reports their count before pushing.
 - `anticlaude refresh` is experimental; GitHub does not guarantee cache invalidation and statistics may take time to settle.
 - Forks generally should not be rewritten when they must remain compatible with their upstream repository.
 
@@ -170,6 +168,7 @@ src/
 ├── lib.rs       # library entry point and command dispatch
 ├── cli.rs       # command-line arguments and command model
 ├── app.rs       # repository cleanup and GitHub refresh workflow
+├── rewrite.rs   # native Git commit and tag rewriting engine
 └── settings.rs  # Claude Code attribution settings
 ```
 
