@@ -1,50 +1,101 @@
-# AntiClaude
+<p align="center">
+  <img width="28%" src="AntiClaude.svg" alt="AntiClaude logo" />
+</p>
 
-AntiClaude removes Claude/Anthropic attribution from every branch and tag in a GitHub repository, force-pushes the cleaned history, and refreshes GitHub's cached Contributors graph.
+<h1 align="center">AntiClaude</h1>
 
-It is a Rust implementation inspired by [declaude](https://github.com/ediiloupatty/declaude).
+<p align="center">
+  Remove Claude and Anthropic attribution from a GitHub repository in one command.
+</p>
 
-## Install
+**AntiClaude is a Rust CLI that cleans AI attribution from Git history, updates the affected remote refs, and refreshes GitHub's Contributors graph.**
 
-Prerequisites:
+Claude Code can add `Co-Authored-By` trailers and generation notices to commit messages. Removing them from the latest commit is not enough: older commits, branches, tags, and GitHub's cached contributor statistics may still retain the attribution. AntiClaude handles the complete cleanup workflow without modifying the repository's file contents or human authorship.
+
+## Get Started
+
+### Requirements
 
 - Rust 1.85 or newer
-- `git`
+- [Git](https://git-scm.com/)
 - [`git-filter-repo`](https://github.com/newren/git-filter-repo)
-- [GitHub CLI](https://cli.github.com/) authenticated with `gh auth login`
+- [GitHub CLI](https://cli.github.com/), authenticated with `gh auth login`
 
-Install the executable from this checkout:
+On macOS, the external tools can be installed with Homebrew:
+
+```sh
+brew install git-filter-repo gh
+gh auth login
+```
+
+### Install
+
+From this repository:
 
 ```sh
 cargo install --path .
 ```
 
-## Use
+### Run
 
-Run the complete operation with one command:
+Pass a GitHub `OWNER/REPO` slug or full repository URL:
 
 ```sh
 anticlaude OWNER/REPO
 ```
 
-A full GitHub URL also works:
-
 ```sh
 anticlaude https://github.com/OWNER/REPO
 ```
 
-AntiClaude shows the affected refs and asks for confirmation. Use `-y` in automation:
+AntiClaude clones the repository into a temporary directory, shows the affected branches and tags, and asks for confirmation before changing the remote.
 
-```sh
-anticlaude OWNER/REPO -y
-```
+## What AntiClaude Does
 
-Useful options:
+One command performs the full cleanup sequence:
+
+1. Clones every remote branch into a temporary working directory.
+2. Detects Claude and Anthropic traces across all branches and tags.
+3. Creates a restorable Git bundle in `~/.anticlaude-backups/`.
+4. Rewrites matching commit messages with `git-filter-repo`.
+5. Force-pushes affected branches and tags.
+6. Waits until GitHub has indexed the rewritten history.
+7. Refreshes and verifies the Contributors graph.
+8. Deletes the temporary local clone.
+
+AntiClaude removes message attribution such as:
 
 ```text
---dry-run      inspect without changing anything
---no-refresh   skip the GitHub Contributors graph refresh
---no-backup    skip the backup bundle (not recommended)
+Co-Authored-By: Claude <noreply@anthropic.com>
+Generated with Claude Code
+```
+
+It does not modify tracked files or replace commit author and committer identities.
+
+## Commands and Options
+
+Preview the operation without changing anything:
+
+```sh
+anticlaude OWNER/REPO --dry-run
+```
+
+Skip the confirmation prompt:
+
+```sh
+anticlaude OWNER/REPO --yes
+```
+
+Skip the Contributors graph refresh:
+
+```sh
+anticlaude OWNER/REPO --no-refresh
+```
+
+Skip the backup bundle:
+
+```sh
+anticlaude OWNER/REPO --no-backup
 ```
 
 Prevent Claude Code from adding attribution to future commits:
@@ -53,17 +104,24 @@ Prevent Claude Code from adding attribution to future commits:
 anticlaude prevent
 ```
 
-## Safety and behavior
+For the complete CLI reference:
 
-- A restorable bundle is written to `~/.anticlaude-backups/` before history changes.
-- Only commit messages are cleaned. Claude author or committer identities are reported but not changed.
-- All remote branches are materialized and rewritten.
-- Only tags whose object changed are force-pushed.
-- AntiClaude waits for GitHub to index the rewritten history before refreshing the graph.
-- The graph refresh renames the default branch temporarily, restores it, then pushes one empty `chore: refresh GitHub contributors` commit using the latest commit's author identity.
-- Protected branches, protected tags, and repository rulesets can reject force-pushes.
+```sh
+anticlaude --help
+```
 
-Restore a backup into a clone with:
+## Safety
+
+History rewriting changes commit IDs and requires force-pushing. Use AntiClaude only on repositories where you are authorized to rewrite history.
+
+- A backup bundle is created before rewriting unless `--no-backup` is supplied.
+- Protected branches, protected tags, and repository rulesets may reject the push.
+- Collaborators must synchronize their local clones after rewritten history is pushed.
+- Annotated release tags may receive new object IDs, while GitHub release assets remain associated with their tag names.
+- GitHub contributor statistics are cached and may take time to settle after a force-push.
+- Forks generally should not be rewritten when they must remain compatible with their upstream repository.
+
+Restore refs from a backup bundle with:
 
 ```sh
 git fetch ~/.anticlaude-backups/REPO-TIMESTAMP.bundle '*:*'
@@ -71,25 +129,33 @@ git fetch ~/.anticlaude-backups/REPO-TIMESTAMP.bundle '*:*'
 
 ## Development
 
+Run the test suite and static analysis before submitting changes:
+
 ```sh
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+cargo build --locked --release
 ```
 
-### Project structure
+### Project Structure
 
 ```text
 src/
-├── main.rs  # minimal executable entry point
-├── lib.rs   # library entry point and command dispatch
-├── cli.rs   # command-line arguments and command model
-├── app.rs   # repository cleanup and GitHub refresh workflow
-└── settings.rs # Claude Code attribution settings
+├── main.rs      # executable entry point
+├── lib.rs       # library entry point and command dispatch
+├── cli.rs       # command-line arguments and command model
+├── app.rs       # repository cleanup and GitHub refresh workflow
+└── settings.rs  # Claude Code attribution settings
 ```
 
-Keeping the executable entry point separate from the library allows the workflow to be tested and reused without invoking a subprocess.
+## Contributions and Feedback
+
+Bug reports, feature requests, and pull requests are welcome. When reporting a failure, include the AntiClaude version, operating system, command options, and sanitized command output. Do not include access tokens or private repository content.
+
+## Acknowledgements
+
+AntiClaude is a Rust implementation inspired by [ediiloupatty/declaude](https://github.com/ediiloupatty/declaude).
 
 ## License
 
-MIT
-
+This project is licensed under the [MIT License](LICENSE).
