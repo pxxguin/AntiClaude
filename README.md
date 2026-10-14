@@ -174,7 +174,9 @@ src/
 
 ## Contributions and Feedback
 
-Bug reports, feature requests, and pull requests are welcome. When reporting a failure, include the AntiClaude version, operating system, command options, and sanitized command output. Do not include access tokens or private repository content.
+Bug reports, feature requests, and pull requests are welcome. See the [contribution guidelines](CONTRIBUTING.md) before submitting a change. Participation in this project is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+When reporting a failure, include the AntiClaude version, operating system, command options, and sanitized command output. Do not include access tokens or private repository content. Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
 
 ## Acknowledgements
 
@@ -182,4 +184,4 @@ AntiClaude is a Rust implementation inspired by [ediiloupatty/declaude](https://
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is dual-licensed under the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), at your option.

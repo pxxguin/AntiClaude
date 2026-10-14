@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2021"
 authors = ["pxxguin"]
 description = "Safely remove Claude attribution from GitHub repository history"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/pxxguin/AntiClaude"
 
 [[bin]]
