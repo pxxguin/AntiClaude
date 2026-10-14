@@ -450,6 +450,18 @@ fn flush(slug: &str) -> Result<()> {
                 ],
                 None,
             )?;
+            if exists(slug, &t) {
+                cmd(
+                    "gh",
+                    &[
+                        "api",
+                        "-X",
+                        "DELETE",
+                        &format!("repos/{slug}/git/refs/heads/{t}"),
+                    ],
+                    None,
+                )?;
+            }
             return Ok(());
         }
         if i < 4 {
@@ -462,15 +474,15 @@ fn refresh_commit(r: &Path, amend: bool) -> Result<()> {
     let b = git(r, &["branch", "--show-current"])?;
     let n = git(r, &["log", "-1", "--format=%an"])?;
     let e = git(r, &["log", "-1", "--format=%ae"])?;
+    let name_config = format!("user.name={n}");
+    let email_config = format!("user.email={e}");
     let mut a = vec![
         "-c",
         "commit.gpgsign=false",
         "-c",
-        "user.name",
-        &n,
+        &name_config,
         "-c",
-        "user.email",
-        &e,
+        &email_config,
         "commit",
     ];
     if amend {
@@ -600,5 +612,45 @@ mod tests {
         assert!(!Regex::new("(?i)claude|anthropic")
             .unwrap()
             .is_match(&message));
+    }
+
+    #[test]
+    fn refresh_commit_reuses_latest_author_and_pushes() {
+        let temp = TempDir::new().unwrap();
+        let remote = temp.path().join("remote.git");
+        let work = temp.path().join("work");
+        let remote_path = remote.to_string_lossy();
+        let work_path = work.to_string_lossy();
+        cmd("git", &["init", "--bare", "-b", "main", &remote_path], None).unwrap();
+        cmd("git", &["clone", &remote_path, &work_path], None).unwrap();
+        fs::write(work.join("file.txt"), "content").unwrap();
+        cmd("git", &["add", "file.txt"], Some(&work)).unwrap();
+        cmd(
+            "git",
+            &[
+                "-c",
+                "user.name=Original Author",
+                "-c",
+                "user.email=author@example.com",
+                "commit",
+                "-m",
+                "initial",
+            ],
+            Some(&work),
+        )
+        .unwrap();
+        cmd("git", &["push", "origin", "main"], Some(&work)).unwrap();
+
+        refresh_commit(&work, false).unwrap();
+
+        assert_eq!(git(&work, &["log", "-1", "--format=%s"]).unwrap(), REFRESH);
+        assert_eq!(
+            git(&work, &["log", "-1", "--format=%an <%ae>"]).unwrap(),
+            "Original Author <author@example.com>"
+        );
+        assert_eq!(
+            git(&work, &["rev-parse", "HEAD"]).unwrap(),
+            git(&work, &["rev-parse", "origin/main"]).unwrap()
+        );
     }
 }
