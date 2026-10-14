@@ -16,23 +16,45 @@ Claude Code can add `Co-Authored-By` trailers and generation notices to commit m
 
 ### Requirements
 
-- Rust 1.85 or newer
 - [Git](https://git-scm.com/)
 - [`git-filter-repo`](https://github.com/newren/git-filter-repo)
 - [GitHub CLI](https://cli.github.com/), authenticated with `gh auth login`
+- Rust 1.85 or newer only when building from source
 
-On macOS, the external tools can be installed with Homebrew:
+#### macOS
 
 ```sh
 brew install git-filter-repo gh
 gh auth login
 ```
 
+#### Linux
+
+Install Git and Python with your distribution's package manager, install GitHub CLI using its [official Linux instructions](https://github.com/cli/cli/blob/trunk/docs/install_linux.md), then run:
+
+```sh
+python3 -m pip install --user git-filter-repo
+gh auth login
+```
+
+#### Windows
+
+Run the following in PowerShell or Windows Terminal:
+
+```powershell
+winget install --id Git.Git -e
+winget install --id GitHub.cli -e
+py -m pip install git-filter-repo
+gh auth login
+```
+
+Open a new terminal after installation so `git`, `git filter-repo`, and `gh` are available on `PATH`.
+
 ### Install
 
 Prebuilt archives for Linux, macOS, and Windows are published on the [Releases page](https://github.com/pxxguin/AntiClaude/releases).
 
-To build and install from this repository:
+To build and install from this repository on any supported platform:
 
 ```sh
 cargo install --path .
