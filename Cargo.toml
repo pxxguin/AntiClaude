@@ -1,0 +1,25 @@
+[package]
+name = "anticlaude"
+version = "0.1.0"
+edition = "2021"
+authors = ["pxxguin"]
+description = "Remove Claude attribution from GitHub repository history and refresh contributors"
+license = "MIT"
+repository = "https://github.com/pxxguin/AntiClaude"
+
+[[bin]]
+name = "anticlaude"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6.0"
+regex = "1.11"
+serde_json = "1.0"
+tempfile = "3.13"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+
