@@ -76,6 +76,18 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
+### Project structure
+
+```text
+src/
+├── main.rs  # minimal executable entry point
+├── lib.rs   # library entry point and command dispatch
+├── cli.rs   # command-line arguments and command model
+└── app.rs   # repository cleanup and GitHub refresh workflow
+```
+
+Keeping the executable entry point separate from the library allows the workflow to be tested and reused without invoking a subprocess.
+
 ## License
 
 MIT
