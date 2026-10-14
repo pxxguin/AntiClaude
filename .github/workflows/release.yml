@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            archive: anticlaude-linux-x86_64.tar.gz
+            binary: anticlaude
+          - name: macOS Apple Silicon
+            os: macos-14
+            archive: anticlaude-macos-aarch64.tar.gz
+            binary: anticlaude
+          - name: macOS Intel
+            os: macos-13
+            archive: anticlaude-macos-x86_64.tar.gz
+            binary: anticlaude
+          - name: Windows x86_64
+            os: windows-latest
+            archive: anticlaude-windows-x86_64.zip
+            binary: anticlaude.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --locked --release
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        run: tar -czf "${{ matrix.archive }}" -C target/release "${{ matrix.binary }}"
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "target/release/${{ matrix.binary }}" -DestinationPath "${{ matrix.archive }}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive }}
+          generate_release_notes: true
